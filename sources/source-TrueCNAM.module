@@ -18,71 +18,98 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * 06.04.2014 initial release by James Finstrom jfinstrom@sangoma.com
- *
+ * 2015-06-04 initial release by James Finstrom jfinstrom@sangoma.com
+ * 
  */
 
 class TrueCNAM extends superfecta_base{
-  public $description = "truecnam.com lookup module can pull CNAM, stored CNAM and spam score.";
-  public $version_requirement = "2.11";
-  public $source_param = array(
-    'APIKey' => array(
-      'description' => "API Key - Can be obtained after registering with truecnam.com",
-      'type' => 'text'
-    ),
-    'Password' => array(
-      'description' => "truecnam password",
-      'type' => 'password'
-    ),
-    'TrueSpam' => array(
-      'description' => 'Evaluate TrueSpam score',
-      'type' => 'checkbox',
-      'default' => 'checked'
-    ),
-    'TrueSpam_Threshold' => array(
-      'description' => "Maximum TrueSPAM score",
-      'type' => 'number',
-      'default' => '6'
-    )
-  );
-  function get_caller_id($thenumber, $run_param=array()) {
-    $run_param['APIKey'] = isset($run_param['APIKey'])?$run_param['APIKey']:'';
-    $run_param['Password'] = isset($run_param['Password'])?$run_param['Password']:'';
-    $run_param['TrueSpam'] = isset($run_param['TrueSpam'])?$run_param['TrueSpam']:'checked';
-    $run_param['TrueSpam_Threshold'] = isset($run_param['TrueSpam_Threshold'])?$run_param['TrueSpam_Threshold']:'6';
-    $thenumber = urlencode($thenumber);
-    $debug = $this->debug;
-    if(empty($run_param['APIKey']) || empty($run_param['Password'])) {
-        $this->DebugPrint("TrueCNAM requires a registered account.");
-        return '';
-    }
-    if($run_param['TrueSpam']){
-      $this->DebugPrint("TrueSpam enabled");
-      $resp_type = 'extended';
-    }else{
-      $this->DebugPrint("TrueSpam disabled");
-      $resp_type = 'basic';
-    }
-    $url = sprintf("https://api.truecnam.net/api/v1?username=%s&password=%s&resp_type=%s&resp_format=json&calling_number=%s&call_party=terminating",$run_param['APIKey'],$run_param['Password'],$resp_type,$thenumber);
-    $ret = $this->get_url_contents($url);
-    $data = json_decode($ret, true);
-    if($data['err']){
-     $this->DebugPrint("Lookup Error");
-      $this->DebugPrint($data['error_message']);
-    }
-    if($run_param['TrueSpam']){
-      if($data['spam_score_match']){
-        $this->DebugPrint("TrueSpam Score available");
-        if($data['spam_score'] > $run_param['TrueSpam_Threshold']){
-          $this->spam = true;
-        }else{
-          $this->spam = false;
+    public $description = "truecnam.com lookup module can pull CNAM, stored CNAM and spam score.";
+    public $version_requirement = "2.11";
+    public $source_param = array(
+        'APIKey' => array(
+            'description' => "API Key - Can be obtained after registering with truecnam.com",
+            'type' => 'text',
+        ),
+        'Password' => array(
+            'description' => "truecnam password",
+            'type' => 'password',
+        ),
+        'Use_for_CNAM' => array(
+            'description' => 'Use truecnam.com to look up Caller ID',
+            'type' => 'checkbox',
+            'default' => 'on',
+        ),
+        'TrueSpam' => array(
+            'description' => 'Use truecnam.com to look up a spam score',
+            'type' => 'checkbox',
+            'default' => null,
+        ),
+        'TrueSpam_Threshold' => array(
+            'description' => "Minimum threshold at which a call is considered spam. TrueSPAM score ranges from 0-100 with 100 being spammer",
+            'type' => 'number',
+            'default' => '80',
+        ),
+        'Share_DID' => array(
+            'description' => 'Share the DID (number being dialed, i.e. your phone number not the number of the inbound caller) being called with truecnam.com to assist their algorithm efforts - optional.',
+            'type' => 'checkbox',
+            'default' => null,
+        ),
+    );
+    function get_caller_id($thenumber, $run_param=array()) {
+        $debug = $this->debug;
+        if(empty($run_param['APIKey']) || empty($run_param['Password'])) {
+            $this->DebugPrint("TrueCNAM requires a registered account.");
+            return '';
         }
-      }else{
-        $this->DebugPrint("TrueSpam Score not available");
-        $this->spam = false;
-      }
+        $this->DebugPrint("Searching www.truecnam.com ...");
+
+        // If user has opted to share DID, truecnam.com requires DID to be a proper phone number
+        if($run_param['Share_DID']) {
+            $the_did = $this->get_DID();
+            if (!is_numeric($the_did)){
+                $the_did = null;
+            } else {
+                $this->DebugPrint("Sharing DID = ".$the_did." with truecnam.com");
+            }
+        } else {
+            $this->DebugPrint("Withholding DID from truecnam.com");
+            $the_did = null;
+        }
+
+        // different response types are supported, extended response type returns all information and we can check ['cnam_match'] for true
+        $resp_type = 'extended';
+
+        $url = sprintf("https://api.truecnam.net/api/v1?username=%s&password=%s&resp_type=%s&resp_format=json&calling_number=%s&call_party=terminating&called_number=%s",$run_param['APIKey'],$run_param['Password'],$resp_type,$thenumber,$the_did);
+
+        $ret = $this->get_url_contents($url);
+        $data = json_decode($ret, true);
+        if($data['err']){
+            $this->DebugPrint("Lookup Error");
+            $this->DebugPrint($data['error_message']);
+            return;
+        }
+        // only do spam scoring if enabled by user
+        if($run_param['TrueSpam']){
+            if($data['spam_score_match']){
+                if($data['spam_score'] > $run_param['TrueSpam_Threshold']){
+                    $this->spam = true;
+                    $this->DebugPrint("Spam score ".$data['spam_score']." exceeds threshold ".$run_param['TrueSpam_Threshold'].", marking call as spam");
+                }else{
+                    $this->DebugPrint("Spam score ".$data['spam_score']." less than threshold ".$run_param['TrueSpam_Threshold'].", not marking call as spam");
+                }
+            }else{
+                $this->DebugPrint("TrueSpam Score not available");
+            }
+        } else {
+            $this->DebugPrint("Not evaluating spam score");
+        }
+
+        // Only use for CNAM if enabled by user and lookup succeeds
+        if ($data['cnam_match'] && $run_param['Use_for_CNAM']){
+            $this->DebugPrint("Found name...");
+            return($data['name']);
+        } else {
+            $this->DebugPrint("Name not available or not configured for name lookup");
+        }
     }
-    return($data['name']);
-  }
 }
